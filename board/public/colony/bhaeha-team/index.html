@@ -34,7 +34,7 @@
   <button>Fetch</button>
 </form>
 <div class="card">
-  <h2>Nearby restaurants (live OpenStreetMap, Overture fallback)</h2>
+  <h2>Nearby restaurants (live Google Places or OpenStreetMap, Overture fallback)</h2>
   <button type="button" id="loc">Use my location</button>
   <button type="button" id="near">Find nearby</button>
   <span id="nearmsg"></span>
@@ -124,7 +124,7 @@
       const r = await fetch('/t/bhaeha-team/restaurants?' + new URLSearchParams({ lat, lng, radius_m: 800, limit: 25, live: 1 }));
       const j = await r.json();
       if (!r.ok) throw new Error(j.error || 'failed');
-      nearmsg.textContent = ' ' + j.restaurants.length + ' found (' + (j.source === 'osm' ? 'live OpenStreetMap' : 'bundled Overture data') + ')';
+      nearmsg.textContent = ' ' + j.restaurants.length + ' found (' + ({ google: 'live Google Places', osm: 'live OpenStreetMap' }[j.source] || 'bundled Overture data') + ')';
       for (const e of j.restaurants) {
         const open = () => {
           f.elements.id.value = e.id;

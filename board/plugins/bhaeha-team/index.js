@@ -50,6 +50,72 @@ async function lookupOsm(id) {
   }
 }
 
+// Google Places (New). The key is read only from the server environment and never logged or returned.
+const googleKey = () => process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API || '';
+const googleCache = new Map();
+
+// Details for ids "google:<place_id>": returns tags like OSM so the same menu pipeline can use the website.
+async function lookupGoogle(id) {
+  const m = /^google:([A-Za-z0-9_-]{10,200})$/.exec(id);
+  const key = googleKey();
+  if (!m || !key) return null;
+  const hit = googleCache.get(id);
+  if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.tags;
+  try {
+    const r = await fetch(`https://places.googleapis.com/v1/places/${m[1]}`, {
+      headers: { 'x-goog-api-key': key, 'x-goog-fieldmask': 'displayName,websiteUri,nationalPhoneNumber,formattedAddress' },
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const tags = { name: j.displayName && j.displayName.text, website: j.websiteUri, phone: j.nationalPhoneNumber, address: j.formattedAddress, _google: true };
+    googleCache.set(id, { ts: Date.now(), tags });
+    return tags;
+  } catch (err) {
+    console.error('[bhaeha-team] google details:', err && err.message);
+    return null;
+  }
+}
+
+async function googleNearby(lat, lng, radiusM, limit) {
+  const key = googleKey();
+  if (!key) return null;
+  try {
+    const r = await fetch('https://places.googleapis.com/v1/places:searchNearby', {
+      method: 'POST',
+      headers: {
+        'x-goog-api-key': key,
+        'content-type': 'application/json',
+        'x-goog-fieldmask': 'places.id,places.displayName,places.location,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,places.primaryType',
+      },
+      body: JSON.stringify({
+        includedTypes: ['restaurant'],
+        maxResultCount: Math.min(limit, 20),
+        rankPreference: 'DISTANCE',
+        locationRestriction: { circle: { center: { latitude: lat, longitude: lng }, radius: Math.min(radiusM, 50000) } },
+      }),
+      signal: AbortSignal.timeout(6000),
+    });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const k = Math.cos(lat * Math.PI / 180);
+    return (j.places || []).filter((p) => p.id && p.location).map((p) => ({
+      id: 'google:' + p.id,
+      name: (p.displayName && p.displayName.text) || 'Unnamed',
+      lat: p.location.latitude,
+      lng: p.location.longitude,
+      category: (p.primaryType || 'restaurant'),
+      website: httpUrl(p.websiteUri),
+      phone: p.nationalPhoneNumber || null,
+      address: p.formattedAddress || null,
+      distance_m: Math.round(Math.hypot((p.location.latitude - lat) * 111320, (p.location.longitude - lng) * 111320 * k)),
+    }));
+  } catch (err) {
+    console.error('[bhaeha-team] google nearby:', err && err.message);
+    return null;
+  }
+}
+
 const NOMINATIM = 'https://nominatim.openstreetmap.org';
 const nominatimHeaders = { 'user-agent': 'tablewise-workshop/1.0', accept: 'application/json' };
 
@@ -107,6 +173,11 @@ async function liveOsmNearby(lat, lng, radiusM, limit) {
   const key = [lat.toFixed(3), lng.toFixed(3), radiusM, limit].join(':');
   const hit = nearCache.get(key);
   if (hit && Date.now() - hit.ts < 10 * 60 * 1000) return hit.list;
+  const g = await googleNearby(lat, lng, radiusM, limit);
+  if (g && g.length) {
+    nearCache.set(key, { ts: Date.now(), list: g, source: 'google' });
+    return g;
+  }
   const body = 'data=' + encodeURIComponent(`[out:json][timeout:8];nwr(around:${radiusM},${lat},${lng})["amenity"="restaurant"]["name"];out center tags ${limit};`);
   const ask = (url) => fetch(url, {
     method: 'POST',
@@ -323,7 +394,7 @@ module.exports = {
         const limit = Math.min(Math.max(parseInt(q.get('limit'), 10) || 100, 1), 300);
         if (q.get('live') === '1') {
           const live = await liveOsmNearby(lat, lng, radius, limit);
-          if (live) return send(res, 200, { source: 'osm', restaurants: live }), true;
+          if (live) return send(res, 200, { source: live[0].id.startsWith('google:') ? 'google' : 'osm', restaurants: live }), true;
         }
         send(res, 200, { source: 'overture', restaurants: nearby(lat, lng, radius, limit) });
       } catch (err) {
@@ -348,8 +419,9 @@ module.exports = {
       if (to < from) return send(res, 400, { error: 'to must not be before from' }), true;
       if ((to - from) / 86400000 + 1 > MAX_DAYS) return send(res, 400, { error: `range is limited to ${MAX_DAYS} days` }), true;
       const place = id.startsWith('overture:') ? placeById(id) : null;
-      const tags = place ? { website: place.website, phone: place.phone, name: place.name, address: place.address, _overture: true } : await lookupOsm(id);
+      const tags = place ? { website: place.website, phone: place.phone, name: place.name, address: place.address, _overture: true } : id.startsWith('google:') ? await lookupGoogle(id) : await lookupOsm(id);
       const out = tags ? fromOsm(id, from, to, tags) : { id, from: iso(from), to: iso(to), menu_url: null, days: [], offers: [], source: 'none', confidence: 0 };
+      if (tags && tags._google) Object.assign(out, { source: 'google', name: tags.name, phone: tags.phone || null, address: tags.address || null });
       if (tags && tags._overture) Object.assign(out, { source: 'overture', name: tags.name, phone: tags.phone || null, address: tags.address || null });
       const items = out.menu_url || out.website ? await scrapeMenu(out.menu_url || out.website) : [];
       if (!items.length) {
