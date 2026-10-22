@@ -63,12 +63,13 @@ async function lookupGoogle(id) {
   if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.tags;
   try {
     const r = await fetch(`https://places.googleapis.com/v1/places/${m[1]}`, {
-      headers: { 'x-goog-api-key': key, 'x-goog-fieldmask': 'displayName,websiteUri,nationalPhoneNumber,formattedAddress' },
+      headers: { 'x-goog-api-key': key, 'x-goog-fieldmask': 'displayName,websiteUri,nationalPhoneNumber,formattedAddress,servesVegetarianFood,servesBreakfast,servesBrunch,servesLunch,servesDinner,menuForChildren' },
       signal: AbortSignal.timeout(6000),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const tags = { name: j.displayName && j.displayName.text, website: j.websiteUri, phone: j.nationalPhoneNumber, address: j.formattedAddress, _google: true };
+    const tags = { name: j.displayName && j.displayName.text, website: j.websiteUri, phone: j.nationalPhoneNumber, address: j.formattedAddress, _google: true, 'diet:vegetarian': j.servesVegetarianFood ? 'yes' : undefined,
+      serves: ['Breakfast', 'Brunch', 'Lunch', 'Dinner'].filter((x) => j['serves' + x]).concat(j.menuForChildren ? ['Kids menu'] : []) };
     googleCache.set(id, { ts: Date.now(), tags });
     return tags;
   } catch (err) {
@@ -421,7 +422,7 @@ module.exports = {
       const place = id.startsWith('overture:') ? placeById(id) : null;
       const tags = place ? { website: place.website, phone: place.phone, name: place.name, address: place.address, _overture: true } : id.startsWith('google:') ? await lookupGoogle(id) : await lookupOsm(id);
       const out = tags ? fromOsm(id, from, to, tags) : { id, from: iso(from), to: iso(to), menu_url: null, days: [], offers: [], source: 'none', confidence: 0 };
-      if (tags && tags._google) Object.assign(out, { source: 'google', name: tags.name, phone: tags.phone || null, address: tags.address || null });
+      if (tags && tags._google) Object.assign(out, { source: 'google', serves: tags.serves, name: tags.name, phone: tags.phone || null, address: tags.address || null });
       if (tags && tags._overture) Object.assign(out, { source: 'overture', name: tags.name, phone: tags.phone || null, address: tags.address || null });
       const items = out.menu_url || out.website ? await scrapeMenu(out.menu_url || out.website) : [];
       if (!items.length) {
