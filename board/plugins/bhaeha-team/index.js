@@ -174,8 +174,9 @@ function extractItems(html) {
     .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
     .replace(/<\/(p|div|li|tr|h\d|br|td|dd|dt|span)>|<br\s*\/?>/gi, '\n')
     .replace(/<[^>]+>/g, ' ')
-    .replace(/&nbsp;/g, ' ')
-    .replace(/&amp;/g, '&');
+    .replace(/&#(\d+);/g, (_, n) => String.fromCodePoint(Math.min(Number(n), 0x10ffff)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCodePoint(Math.min(parseInt(n, 16), 0x10ffff)))
+    .replace(/&(nbsp|amp|quot|apos|lt|gt|aring|auml|ouml|Aring|Auml|Ouml|eacute|egrave);/g, (_, n) => ({ nbsp: ' ', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', aring: 'å', auml: 'ä', ouml: 'ö', Aring: 'Å', Auml: 'Ä', Ouml: 'Ö', eacute: 'é', egrave: 'è' })[n]);
   const seen = new Set();
   for (const raw of text.split('\n')) {
     const line = raw.replace(/\s+/g, ' ').trim();
