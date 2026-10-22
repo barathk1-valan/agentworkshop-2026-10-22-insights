@@ -42,7 +42,7 @@ Additive fields (only when the id is known): `name`, `website`, `phone`, `addres
 
 No mock data: everything is real or empty.
 - Ids `osm:<node|way|relation>:<n>` (also `osm:node/<n>`) are looked up live in OpenStreetMap (Overpass, cached 6 h). Ids `overture:<uuid>` come from the bundled Overture Maps file.
-- The restaurant's `menu_url` or `website` is fetched and "dish + price" lines are extracted (`source: "website"`, confidence 0.4). Pages are undated, so the same items are listed for every date in the range.
+- The restaurant's `menu_url` or `website` is fetched (redirects followed safely) and "dish + price" lines are extracted. If the page has none, up to 3 same-site links that look like a menu (meny, menu, lunch, dagens ...) are tried. A page needs at least 3 dish lines to count. About 1 in 10 sites publishes a readable HTML menu; PDFs, images and JavaScript menus are not read (`source: "website"`, confidence 0.4). Pages are undated, so the same items are listed for every date in the range.
 - If nothing readable is found, `days` and `offers` are empty arrays. Offers are never invented.
 - Unknown ids return 200 with `source: "none"` and empty `days`/`offers`.
 - `source` is one of `"website"`, `"osm"`, `"overture"`, `"none"`.

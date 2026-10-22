@@ -144,40 +144,89 @@ function isPrivateIp(ip) {
   return a === 0 || a === 10 || a === 127 || (a === 169 && b === 254) || (a === 172 && b >= 16 && b < 32) || (a === 192 && b === 168);
 }
 
-// Fetches a public menu page and extracts "dish ... price" lines. Heuristic: pages are not dated, so items apply to the whole range.
+// Fetches a public page. Follows up to 3 redirects by hand so every hop is re-validated (http(s) only, no private IPs).
+async function fetchHtml(url) {
+  let cur = url;
+  for (let hop = 0; hop < 4; hop++) {
+    const u = new URL(cur);
+    if (!/^https?:$/.test(u.protocol)) return null;
+    const addrs = await dns.lookup(u.hostname, { all: true });
+    if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) return null;
+    const r = await fetch(cur, {
+      headers: { 'user-agent': 'tablewise-workshop/1.0', accept: 'text/html' },
+      redirect: 'manual',
+      signal: AbortSignal.timeout(6000),
+    });
+    if (r.status >= 300 && r.status < 400 && r.headers.get('location')) {
+      cur = new URL(r.headers.get('location'), cur).href;
+      continue;
+    }
+    const type = r.headers.get('content-type') || '';
+    if (!r.ok || !/text\/html|text\/plain/.test(type)) return null;
+    return { url: cur, html: (await r.text()).slice(0, MAX_PAGE_BYTES) };
+  }
+  return null;
+}
+
+function extractItems(html) {
+  const items = [];
+  const text = html
+    .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
+    .replace(/<\/(p|div|li|tr|h\d|br|td|dd|dt|span)>|<br\s*\/?>/gi, '\n')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&amp;/g, '&');
+  const seen = new Set();
+  for (const raw of text.split('\n')) {
+    const line = raw.replace(/\s+/g, ' ').trim();
+    const m = /^(.{3,80}?)[\s.:–-]+(?:[€$£]\s?)?(\d{1,4}(?:[.,]\d{1,2})?)\s?(?:€|kr|SEK|EUR|:-|\$|£)?$/.exec(line);
+    if (!m || !/[a-zA-ZÀ-ÿ]{3}/.test(m[1])) continue;
+    const price = Number(m[2].replace(',', '.'));
+    const hasCur = /[€$£]|kr|SEK|EUR|:-/.test(line);
+    if (!hasCur || !price || seen.has(m[1])) continue;
+    seen.add(m[1]);
+    items.push({ name: m[1].slice(0, 80), price, currency: /\$/.test(line) ? 'USD' : /£/.test(line) ? 'GBP' : /€|EUR/.test(line) ? 'EUR' : 'SEK', tags: [], daily_special: false });
+    if (items.length >= 30) break;
+  }
+  return items.length >= 3 ? items : [];
+}
+
+// Same-host links that look like a menu page (Swedish and English words), best matches first, max 3.
+function menuLinks(html, base) {
+  const out = [];
+  const baseUrl = new URL(base);
+  const re = /<a\s[^>]*href\s*=\s*["']([^"'#]+)["'][^>]*>([\s\S]{0,120}?)<\/a>/gi;
+  let m;
+  while ((m = re.exec(html)) && out.length < 20) {
+    const label = (m[2].replace(/<[^>]+>/g, ' ') + ' ' + m[1]).toLowerCase();
+    if (!/meny|menu|lunch|dagens|a-la-carte|alacarte|food|mat\b|dryck/.test(label)) continue;
+    try {
+      const u = new URL(m[1], base);
+      if (!/^https?:$/.test(u.protocol) || u.hostname.replace(/^www\./, '') !== baseUrl.hostname.replace(/^www\./, '')) continue;
+      if (/\.(pdf|jpe?g|png|gif|webp)$/i.test(u.pathname)) continue;
+      if (!out.includes(u.href) && u.href !== base) out.push(u.href);
+    } catch (err) { /* ignore bad href */ }
+  }
+  return out.slice(0, 3);
+}
+
+// Fetches a restaurant page and, if it has no dish prices, up to 3 of its menu subpages.
+// Heuristic: pages are not dated, so items apply to the whole range.
 async function scrapeMenu(url) {
   const hit = pageCache.get(url);
   if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.items;
   let items = [];
   try {
-    const u = new URL(url);
-    const addrs = await dns.lookup(u.hostname, { all: true });
-    if (!addrs.length || addrs.some((a) => isPrivateIp(a.address))) return [];
-    const r = await fetch(url, {
-      headers: { 'user-agent': 'tablewise-workshop/1.0', accept: 'text/html' },
-      redirect: 'manual',
-      signal: AbortSignal.timeout(6000),
-    });
-    const type = r.headers.get('content-type') || '';
-    if (!r.ok || !/text\/html|text\/plain/.test(type)) return [];
-    const html = (await r.text()).slice(0, MAX_PAGE_BYTES);
-    const text = html
-      .replace(/<(script|style)[\s\S]*?<\/\1>/gi, ' ')
-      .replace(/<\/(p|div|li|tr|h\d|br)>|<br\s*\/?>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-      .replace(/&nbsp;/g, ' ')
-      .replace(/&amp;/g, '&');
-    const seen = new Set();
-    for (const raw of text.split('\n')) {
-      const line = raw.replace(/\s+/g, ' ').trim();
-      const m = /^(.{3,80}?)[\s.:–-]+(?:[€$£]\s?)?(\d{1,4}(?:[.,]\d{1,2})?)\s?(?:€|kr|SEK|EUR|:-|\$|£)?$/.exec(line);
-      if (!m || !/[a-zA-ZÀ-ÿ]{3}/.test(m[1])) continue;
-      const price = Number(m[2].replace(',', '.'));
-      const hasCur = /[€$£]|kr|SEK|EUR|:-/.test(line);
-      if (!hasCur || !price || seen.has(m[1])) continue;
-      seen.add(m[1]);
-      items.push({ name: m[1].slice(0, 80), price, currency: /\$/.test(line) ? 'USD' : /£/.test(line) ? 'GBP' : /€|EUR/.test(line) ? 'EUR' : 'SEK', tags: [], daily_special: false });
-      if (items.length >= 30) break;
+    const page = await fetchHtml(url);
+    if (page) {
+      items = extractItems(page.html);
+      if (!items.length) {
+        for (const link of menuLinks(page.html, page.url)) {
+          const sub = await fetchHtml(link).catch(() => null);
+          if (sub) items = extractItems(sub.html);
+          if (items.length) break;
+        }
+      }
     }
   } catch (err) {
     console.error('[bhaeha-team] scrape:', err && err.message);
