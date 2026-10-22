@@ -96,8 +96,9 @@
   document.getElementById('loc').addEventListener('click', () => {
     if (!navigator.geolocation) { nearmsg.textContent = ' Geolocation not supported'; return; }
     navigator.geolocation.getCurrentPosition(
-      (p) => { f.lat.value = p.coords.latitude.toFixed(5); f.lng.value = p.coords.longitude.toFixed(5); nearmsg.textContent = ' Location set'; },
-      () => { nearmsg.textContent = ' Location denied, type lat/lng instead'; }
+      (p) => { f.lat.value = p.coords.latitude.toFixed(5); f.lng.value = p.coords.longitude.toFixed(5); nearmsg.textContent = ' Location set'; findNearby(); },
+      () => { nearmsg.textContent = ' Location denied, type lat/lng instead'; },
+      { enableHighAccuracy: true, timeout: 10000 }
     );
   });
 
