@@ -39,13 +39,65 @@ async function lookupOsm(id) {
       body: 'data=' + encodeURIComponent(body),
       signal: AbortSignal.timeout(8000),
     });
-    if (!r.ok) return null;
+    if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
     const tags = (j.elements && j.elements[0] && j.elements[0].tags) || null;
     if (tags) cache.set(id, { ts: Date.now(), tags });
     return tags;
   } catch (err) {
     console.error('[bhaeha-team] overpass:', err && err.message);
+    return lookupNominatim(id, m[1], m[2]);
+  }
+}
+
+const NOMINATIM = 'https://nominatim.openstreetmap.org';
+const nominatimHeaders = { 'user-agent': 'tablewise-workshop/1.0', accept: 'application/json' };
+
+// Fallback when Overpass is down: same OSM tags via Nominatim's lookup API.
+async function lookupNominatim(id, type, num) {
+  try {
+    const r = await fetch(`${NOMINATIM}/lookup?format=jsonv2&extratags=1&osm_ids=${type[0].toUpperCase()}${num}`, { headers: nominatimHeaders, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) return null;
+    const j = await r.json();
+    const tags = j[0] && j[0].extratags ? { ...j[0].extratags } : null;
+    if (tags) cache.set(id, { ts: Date.now(), tags });
+    return tags;
+  } catch (err) {
+    console.error('[bhaeha-team] nominatim lookup:', err && err.message);
+    return null;
+  }
+}
+
+// Fallback when Overpass is down: OSM restaurants in a bounding box via Nominatim (works worldwide, max 40 results).
+async function nominatimNearby(lat, lng, radiusM, limit) {
+  const dLat = radiusM / 111320;
+  const dLng = radiusM / (111320 * Math.max(Math.cos(lat * Math.PI / 180), 0.01));
+  const viewbox = [lng - dLng, lat + dLat, lng + dLng, lat - dLat].map((x) => x.toFixed(5)).join(',');
+  const url = `${NOMINATIM}/search?format=jsonv2&extratags=1&addressdetails=1&bounded=1&limit=${Math.min(limit, 40)}&q=restaurant&viewbox=${viewbox}`;
+  try {
+    const r = await fetch(url, { headers: nominatimHeaders, signal: AbortSignal.timeout(6000) });
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const j = await r.json();
+    const k = Math.cos(lat * Math.PI / 180);
+    return j.filter((e) => e.type === 'restaurant' && e.name && ['node', 'way', 'relation'].includes(e.osm_type)).map((e) => {
+      const t = e.extratags || {};
+      const la = Number(e.lat);
+      const ln = Number(e.lon);
+      return {
+        id: 'osm:' + e.osm_type + ':' + e.osm_id,
+        name: e.name,
+        lat: la,
+        lng: ln,
+        category: t.cuisine ? t.cuisine.split(';')[0] + '_restaurant' : 'restaurant',
+        website: httpUrl(t.website || t['contact:website']),
+        phone: t.phone || t['contact:phone'] || null,
+        address: e.address ? [e.address.road, e.address.house_number].filter(Boolean).join(' ') || null : null,
+        opening_hours: t.opening_hours || null,
+        distance_m: Math.round(Math.hypot((la - lat) * 111320, (ln - lng) * 111320 * k)),
+      };
+    }).sort((a, b) => a.distance_m - b.distance_m);
+  } catch (err) {
+    console.error('[bhaeha-team] nominatim:', err && err.message);
     return null;
   }
 }
@@ -92,7 +144,9 @@ async function liveOsmNearby(lat, lng, radiusM, limit) {
     return list.length ? list : null;
   } catch (err) {
     console.error('[bhaeha-team] live osm:', err && err.errors ? err.errors.map((x) => x.message).join('; ') : err && err.message);
-    return null;
+    const list = await nominatimNearby(lat, lng, radiusM, limit);
+    if (list && list.length) nearCache.set(key, { ts: Date.now(), list });
+    return list && list.length ? list : null;
   }
 }
 
