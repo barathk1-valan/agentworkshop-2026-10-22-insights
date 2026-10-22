@@ -53,6 +53,49 @@ async function lookupOsm(id) {
 // Google Places (New). The key is read only from the server environment and never logged or returned.
 const googleKey = () => process.env.GOOGLE_PLACES_API_KEY || process.env.GOOGLE_MAPS_API || '';
 const googleCache = new Map();
+const GOOGLE_DETAIL_FIELDS = [
+  'displayName', 'formattedAddress', 'nationalPhoneNumber', 'internationalPhoneNumber', 'websiteUri', 'googleMapsUri',
+  'rating', 'userRatingCount', 'priceLevel', 'priceRange', 'businessStatus', 'primaryTypeDisplayName', 'types',
+  'editorialSummary', 'regularOpeningHours', 'currentOpeningHours', 'dineIn', 'takeout', 'delivery', 'reservable',
+  'outdoorSeating', 'liveMusic', 'goodForGroups', 'goodForChildren', 'allowsDogs', 'accessibilityOptions',
+  'servesVegetarianFood', 'servesBreakfast', 'servesBrunch', 'servesLunch', 'servesDinner', 'servesBeer', 'servesWine',
+  'servesCocktails', 'servesCoffee', 'servesDessert', 'menuForChildren', 'paymentOptions', 'parkingOptions',
+].join(',');
+const PRICE_LEVELS = { PRICE_LEVEL_FREE: 'Free', PRICE_LEVEL_INEXPENSIVE: '$', PRICE_LEVEL_MODERATE: '$$', PRICE_LEVEL_EXPENSIVE: '$$$', PRICE_LEVEL_VERY_EXPENSIVE: '$$$$' };
+
+// Flattens Google's place details into plain label/value facts for display. Only strings, numbers and lists of strings.
+function googleFacts(j) {
+  const f = {};
+  const put = (k, v) => { if (v !== undefined && v !== null && v !== '' && !(Array.isArray(v) && !v.length)) f[k] = v; };
+  put('rating', j.rating);
+  put('rating_count', j.userRatingCount);
+  put('price_level', PRICE_LEVELS[j.priceLevel]);
+  if (j.priceRange && j.priceRange.startPrice) {
+    const sp = j.priceRange.startPrice, ep = j.priceRange.endPrice;
+    put('price_range', `${sp.units || 0}${ep ? '-' + (ep.units || '') : '+'} ${sp.currencyCode || ''}`.trim());
+  }
+  put('status', j.businessStatus);
+  put('type', j.primaryTypeDisplayName && j.primaryTypeDisplayName.text);
+  put('summary', j.editorialSummary && j.editorialSummary.text);
+  put('phone', j.internationalPhoneNumber || j.nationalPhoneNumber);
+  put('address', j.formattedAddress);
+  put('website', httpUrl(j.websiteUri));
+  put('google_maps', httpUrl(j.googleMapsUri));
+  put('open_now', j.currentOpeningHours && typeof j.currentOpeningHours.openNow === 'boolean' ? (j.currentOpeningHours.openNow ? 'yes' : 'no') : undefined);
+  put('opening_hours', (j.regularOpeningHours && j.regularOpeningHours.weekdayDescriptions) || undefined);
+  const yes = ['dineIn', 'takeout', 'delivery', 'reservable', 'outdoorSeating', 'liveMusic', 'goodForGroups', 'goodForChildren', 'allowsDogs', 'menuForChildren']
+    .filter((x) => j[x] === true).map((x) => x.replace(/([A-Z])/g, ' $1').toLowerCase());
+  put('features', yes);
+  const serves = ['Vegetarian', 'Breakfast', 'Brunch', 'Lunch', 'Dinner', 'Beer', 'Wine', 'Cocktails', 'Coffee', 'Dessert'].filter((x) => j['serves' + x + (x === 'Vegetarian' ? 'Food' : '')] === true);
+  put('serves', serves);
+  const acc = j.accessibilityOptions || {};
+  put('accessibility', Object.keys(acc).filter((x) => acc[x] === true).map((x) => x.replace(/([A-Z])/g, ' $1').toLowerCase()));
+  const pay = j.paymentOptions || {};
+  put('payment', Object.keys(pay).filter((x) => pay[x] === true).map((x) => x.replace(/([A-Z])/g, ' $1').toLowerCase()));
+  const park = j.parkingOptions || {};
+  put('parking', Object.keys(park).filter((x) => park[x] === true).map((x) => x.replace(/([A-Z])/g, ' $1').toLowerCase()));
+  return f;
+}
 
 // Details for ids "google:<place_id>": returns tags like OSM so the same menu pipeline can use the website.
 async function lookupGoogle(id) {
@@ -63,13 +106,13 @@ async function lookupGoogle(id) {
   if (hit && Date.now() - hit.ts < CACHE_TTL) return hit.tags;
   try {
     const r = await fetch(`https://places.googleapis.com/v1/places/${m[1]}`, {
-      headers: { 'x-goog-api-key': key, 'x-goog-fieldmask': 'displayName,websiteUri,nationalPhoneNumber,formattedAddress,servesVegetarianFood,servesBreakfast,servesBrunch,servesLunch,servesDinner,menuForChildren' },
+      headers: { 'x-goog-api-key': key, 'x-goog-fieldmask': GOOGLE_DETAIL_FIELDS },
       signal: AbortSignal.timeout(6000),
     });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const j = await r.json();
-    const tags = { name: j.displayName && j.displayName.text, website: j.websiteUri, phone: j.nationalPhoneNumber, address: j.formattedAddress, _google: true, 'diet:vegetarian': j.servesVegetarianFood ? 'yes' : undefined,
-      serves: ['Breakfast', 'Brunch', 'Lunch', 'Dinner'].filter((x) => j['serves' + x]).concat(j.menuForChildren ? ['Kids menu'] : []) };
+    const facts = googleFacts(j);
+    const tags = { name: j.displayName && j.displayName.text, website: j.websiteUri, phone: facts.phone, address: j.formattedAddress, _google: true, 'diet:vegetarian': j.servesVegetarianFood ? 'yes' : undefined, google: facts };
     googleCache.set(id, { ts: Date.now(), tags });
     return tags;
   } catch (err) {
@@ -422,7 +465,7 @@ module.exports = {
       const place = id.startsWith('overture:') ? placeById(id) : null;
       const tags = place ? { website: place.website, phone: place.phone, name: place.name, address: place.address, _overture: true } : id.startsWith('google:') ? await lookupGoogle(id) : await lookupOsm(id);
       const out = tags ? fromOsm(id, from, to, tags) : { id, from: iso(from), to: iso(to), menu_url: null, days: [], offers: [], source: 'none', confidence: 0 };
-      if (tags && tags._google) Object.assign(out, { source: 'google', serves: tags.serves, name: tags.name, phone: tags.phone || null, address: tags.address || null });
+      if (tags && tags._google) Object.assign(out, { source: 'google', google: tags.google, name: tags.name, phone: tags.phone || null, address: tags.address || null });
       if (tags && tags._overture) Object.assign(out, { source: 'overture', name: tags.name, phone: tags.phone || null, address: tags.address || null });
       const items = out.menu_url || out.website ? await scrapeMenu(out.menu_url || out.website) : [];
       if (!items.length) {

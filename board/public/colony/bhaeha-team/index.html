@@ -74,6 +74,15 @@
     if (d.diet && d.diet.length) head.append(el('div', 'Diet: ' + d.diet.join(', ')));
     out.append(head);
 
+    if (d.google) {
+      const g = el('div', '', 'card');
+      g.append(el('h2', 'Google Places data'));
+      const ul = el('ul');
+      for (const [k, v] of Object.entries(d.google)) ul.append(el('li', k.replace(/_/g, ' ') + ': ' + (Array.isArray(v) ? v.join(' | ') : v)));
+      g.append(ul);
+      out.append(g);
+    }
+
     for (const day of d.days) {
       const c = el('div', '', 'card');
       c.append(el('h2', day.date));
